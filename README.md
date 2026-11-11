@@ -1,6 +1,6 @@
-# CSV Import Studio v5 — Space Edition
+# CSV Import
 
-โปรแกรม Python Desktop สำหรับ Windows: นำเข้าไฟล์ CSV/TXT จากเครื่องลง MySQL ผ่านหน้าจอกราฟิก **ธีมอวกาศ**
+โปรแกรม Python Desktop สำหรับ Windows: นำเข้าไฟล์ CSV/TXT จากเครื่องลง MySQL ผ่านหน้าจอระบบ
 
 ## เริ่มใช้งานอย่างง่าย (Windows)
 
