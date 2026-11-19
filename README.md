@@ -47,7 +47,7 @@
 
 ## ตัวอย่างหน้าโปรแกรม
 
-![image](C:\Users\BD.V191\Desktop\Python code\Tool_Import_CSV\Tool_Import_CSV\image.png)
+![image alt](https://github.com/Label-1/Tool_Import_CSV/blob/main/image.png?raw=true)
 
 ## ข้อจำกัดและความปลอดภัย
 
