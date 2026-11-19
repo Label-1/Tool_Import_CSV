@@ -1,15 +1,15 @@
-CSV Import Studio v5 - Space Edition
+CSV Import Studio v6 — Multi-Database Space Edition
+==================================================
+1. ติดตั้ง Python 3.10+ (รวม Tkinter) จาก python.org
+2. แตกไฟล์ ZIP
+3. ดับเบิลคลิก install_windows.bat (ครั้งแรกเท่านั้น) เพื่อรองรับ MySQL/PostgreSQL/MongoDB
+4. ทดลองหน้าจอ: open_demo.pyw
+5. เชื่อมต่อฐานข้อมูลจริง: open_app.pyw
+6. เลือก CSV → กำหนดชื่อปลายทาง → เลือก MySQL/PostgreSQL/SQLite/MongoDB → ทดสอบการเชื่อมต่อ → Import
 
-1) แตกไฟล์ ZIP: คลิกขวา > Extract All...
-2) หากติดตั้ง Python แล้ว: ดับเบิลคลิก open_demo.pyw
-3) ถ้าไม่ขึ้นโปรแกรม: ดับเบิลคลิก run_demo_windows.bat เพื่อดูข้อความ Error
-4) ต้องการ MySQL จริง: ดับเบิลคลิก install_windows.bat ครั้งแรก
-5) แล้วดับเบิลคลิก open_app.pyw เพื่อเปิดโปรแกรมใช้งานจริง
+เปิด .pyw แล้วไม่มีอะไรขึ้น? ใช้ run_demo_windows.bat / run_windows.bat เพื่อตรวจ Error
+SQLite: ไม่ต้องติดตั้งฐานข้อมูล Server มีเพียง Python ก็เปิด/สร้างไฟล์ .db ได้
+MongoDB: Database / Collection ไม่ใช่ SQL Schema / Table
+PostgreSQL: ต้องมี Database อยู่แล้ว โปรแกรมสร้าง Schema ใหม่ได้
 
-วิธีแก้ชื่อคอลัมน์:
-ไปแท็บ Column Mapping > คลิกช่อง 'ชื่อใน MySQL (คลิกแก้)' > พิมพ์ชื่อใหม่ > Enter
-การแก้ชื่อมีผลเฉพาะคอลัมน์ปลายทางใน MySQL ไม่เปลี่ยน CSV ต้นฉบับ
-
-Preview: กดปุ่ม A+/A- หรือ 'ขยายตัวอย่าง' เพื่อดูข้อมูลได้ชัดขึ้น
-
-ดูคำอธิบายเพิ่มเติมใน README_TH.md
+โปรดอ่าน README_TH.md ก่อน Replace ข้อมูลจริง

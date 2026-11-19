@@ -2,7 +2,7 @@
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
-echo CSV Import Studio v5 Space Edition - MySQL Launcher
+echo CSV Import Studio v6 Multi-DB Space Edition - MySQL Launcher
 where py >nul 2>&1
 if not errorlevel 1 (
   py -3 -c "import tkinter" >nul 2>&1

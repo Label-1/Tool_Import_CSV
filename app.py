@@ -1,7 +1,7 @@
-"""CSV Import Studio v5 — Space Edition (Tkinter desktop UI).
+"""CSV Import Studio v6 — Space Edition (Tkinter desktop UI).
 
 Large read-only CSV preview with zoom/pop-out, one-click target-column renaming,
-inline Data Type controls and the unchanged, tested MySQL import engine.
+inline Data Type controls and selectable MySQL/PostgreSQL/SQLite/MongoDB backends.
 """
 from __future__ import annotations
 
@@ -19,10 +19,11 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from importer_core import (
     CSVSpec, ColumnMapping, DbSettings, ImportOptions, FilePreview,
     DELIMITERS, ENCODINGS, TYPES, INDEXABLE_TYPES,
-    connect, list_schemas, list_tables, list_columns,
-    preview_csv, count_csv_rows, run_import, unique_key_columns,
+    preview_csv, count_csv_rows,
     validate_simple_identifier, quote_identifier,
 )
+from database_backends import (BACKENDS, open_connection, server_version,
+    list_schemas, list_tables, list_columns, unique_keys, run_import)
 
 # Mission-control palette. No external UI framework or fonts are required.
 FONT = 'Segoe UI' if sys.platform == 'win32' else 'Noto Sans Thai'
@@ -166,7 +167,7 @@ def section(parent, number: str, heading: str, sub: str = ''):
 class ImportStudio(tk.Tk):
     def __init__(self, demo: bool = False):
         super().__init__()
-        self.title('CSV Import Studio v5  |  Space Edition')
+        self.title('CSV Import Studio v6  |  Space Multi-DB Edition')
         self.minsize(1030, 670)
         screen_width, screen_height = self.winfo_screenwidth(), self.winfo_screenheight()
         width = min(1620, max(1030, screen_width - 36))
@@ -209,6 +210,9 @@ class ImportStudio(tk.Tk):
         except tk.TclError:
             pass
 
+        self.backend_var = tk.StringVar(value='MySQL')
+        self.sqlite_path_var = tk.StringVar()
+        self.pg_database_var = tk.StringVar(value='postgres')
         self.host_var = tk.StringVar(value='127.0.0.1')
         self.port_var = tk.StringVar(value='3306')
         self.user_var = tk.StringVar()
@@ -231,6 +235,10 @@ class ImportStudio(tk.Tk):
         self.progress_var = tk.IntVar(value=0)
 
         self._build_ui()
+        # Credentials and file selection are connection-defining fields.
+        for var in (self.host_var, self.port_var, self.user_var, self.pass_var,
+                    self.pg_database_var, self.sqlite_path_var):
+            var.trace_add('write', lambda *_: self._invalidate_connection())
         self.after(120, self._drain_bus)
         self.schema_var.trace_add('write', lambda *_: (self._schedule_schema_fetch(), self._refresh_destination()))
         self.table_var.trace_add('write', lambda *_: (self._schedule_table_fetch(), self._refresh_destination()))
@@ -291,16 +299,25 @@ class ImportStudio(tk.Tk):
         foot = tk.Frame(self, bg=BG, height=20)
         foot.pack(fill='x')
         foot.pack_propagate(False)
-        label(foot, 'SOURCE  CSV    →    TARGET  MySQL    /    ค่าข้อมูลต้นฉบับไม่ถูกแก้ไข',
+        label(foot, 'SOURCE  CSV    →    TARGET  DATABASE    /    ค่าข้อมูลต้นฉบับไม่ถูกแก้ไข',
               color=MUTED, size=8, bg=BG).pack(side='left', padx=19)
-        label(foot, 'SPACE EDITION  •  v5', color=FAINT, size=8, bg=BG).pack(side='right', padx=18)
+        label(foot, 'MULTI-DB SPACE  •  v6', color=FAINT, size=8, bg=BG).pack(side='right', padx=18)
 
     def _build_sidebar(self, parent):
         header = tk.Frame(parent, bg=BG)
         header.pack(fill='x', pady=(1, 9))
         label(header, 'MISSION SETUP', size=13, bold=True, bg=BG).pack(side='left')
-        make_button(header, 'ตั้งค่า MySQL  ↓', lambda: canvas.yview_moveto(1),
-                    kind='soft', padx=12, pady=5).pack(side='right')
+        make_button(header, 'ตั้งค่าการเชื่อมต่อ  ↓', lambda: canvas.yview_moveto(1),
+                    kind='soft', padx=10, pady=5).pack(side='right')
+        # Choose destination engine before looking at the connection form.
+        engine_row = tk.Frame(parent, bg=BG)
+        engine_row.pack(fill='x', pady=(2, 10))
+        label(engine_row, 'DATABASE ENGINE', size=9, bold=True, color=CYAN,
+              bg=BG).pack(anchor='w', pady=(0, 5))
+        self.backend_combo = ttk.Combobox(engine_row, textvariable=self.backend_var,
+            values=BACKENDS, state='readonly', style='Studio.TCombobox')
+        self.backend_combo.pack(fill='x')
+        self.backend_combo.bind('<<ComboboxSelected>>', self._on_backend_changed)
         # Illustrated step rail is decorative: all functional controls remain below.
         side = tk.Canvas(parent, height=(56 if self.compact_layout else 73),
                          bg=NAVY, highlightbackground=BORDER, highlightthickness=1)
@@ -311,7 +328,7 @@ class ImportStudio(tk.Tk):
             side.create_image(0, 0, image=pic, anchor='nw')
         except tk.TclError:
             pass
-        side.create_text(16, 22, anchor='w', text='CSV  →  MYSQL',
+        side.create_text(16, 22, anchor='w', text='CSV  →  DATABASE',
                          fill='#F4EEFF', font=(FONT, 13, 'bold'))
         side.create_text(16, 44, anchor='w', text='กำหนดเส้นทางข้อมูลของคุณ',
                          fill='#C8D2FF', font=(FONT, 9))
@@ -363,17 +380,20 @@ class ImportStudio(tk.Tk):
         make_button(body, '↻   อ่าน CSV ใหม่', self._load_preview, kind='white', padx=8, pady=6).pack(anchor='w')
 
         # Step 2 - Prominent, editable destination names; no SQL required.
-        outer, body = section(content, '02', 'ตั้งชื่อ Schema และ Table', 'พิมพ์ชื่อใหม่ หรือเลือกชื่อเดิมจากรายการ')
+        outer, body = section(content, '02', 'กำหนดปลายทางข้อมูล', 'เลือก Schema/Database และตั้งชื่อ Table/Collection')
         outer.pack(fill='x', pady=(0, 13))
-        label(body, 'Schema / Database', size=9, bold=True).pack(anchor='w')
+        self.schema_label = label(body, 'Schema / Database', size=9, bold=True)
+        self.schema_label.pack(anchor='w')
         self.schema_combo = ttk.Combobox(body, textvariable=self.schema_var, style='Studio.TCombobox')
         self.schema_combo.pack(fill='x', pady=(5, 5))
         label(body, 'ตัวอย่าง: sales_db หรือ label_idcard_mobile', size=8, color=MUTED).pack(anchor='w')
-        tk.Checkbutton(body, text='สร้าง Schema ใหม่ (หากยังไม่มีใน MySQL)', bg=WHITE, fg=INK,
+        self.create_schema_check = tk.Checkbutton(body, text='สร้าง Schema ใหม่ (เฉพาะ MySQL/PostgreSQL)', bg=WHITE, fg=INK,
                        variable=self.create_schema_var, command=self._schema_mode_changed,
                        selectcolor=INPUT_BG, activebackground=WHITE, activeforeground=INK, cursor='hand2',
-                       font=(FONT, 9)).pack(anchor='w', pady=(7, 11))
-        label(body, 'Table / ชื่อตารางปลายทาง', size=9, bold=True).pack(anchor='w')
+                       font=(FONT, 9))
+        self.create_schema_check.pack(anchor='w', pady=(7, 11))
+        self.table_label = label(body, 'Table / ชื่อตารางปลายทาง', size=9, bold=True)
+        self.table_label.pack(anchor='w')
         self.table_combo = ttk.Combobox(body, textvariable=self.table_var, style='Studio.TCombobox')
         self.table_combo.pack(fill='x', pady=(5, 5))
         label(body, 'แก้ชื่อที่แนะนำจากชื่อไฟล์ได้เลย', size=8, color=MUTED).pack(anchor='w', pady=(0, 10))
@@ -392,10 +412,14 @@ class ImportStudio(tk.Tk):
         self.key_tip.pack(fill='x', pady=(3, 0))
         self._refresh_key_options()
 
-        # Step 3 - Connection test, while file + destination are accessible first.
-        outer, body = section(content, '03', 'เชื่อมต่อ MySQL', 'ใช้บัญชีที่มีสิทธิ์กับ Schema / Table ปลายทาง')
+        # Step 3 - Driver-specific connection controls in the same workflow.
+        outer, body = section(content, '03', 'เชื่อมต่อฐานข้อมูล', 'เลือกประเภทฐานข้อมูลปลายทาง')
         outer.pack(fill='x', pady=(0, 13))
-        pair = tk.Frame(body, bg=WHITE)
+        label(body, 'ฐานข้อมูล: เลือกจาก DATABASE ENGINE ด้านบน',
+              size=9, color=MUTED).pack(anchor='w', pady=(0, 10))
+        self.network_group = tk.Frame(body, bg=WHITE)
+        self.network_group.pack(fill='x')
+        pair = tk.Frame(self.network_group, bg=WHITE)
         pair.pack(fill='x')
         pair.grid_columnconfigure(0, weight=3)
         pair.grid_columnconfigure(1, weight=1)
@@ -403,13 +427,30 @@ class ImportStudio(tk.Tk):
         label(pair, 'Port', size=9).grid(row=0, column=1, sticky='w', padx=(9, 0))
         make_entry(pair, self.host_var).grid(row=1, column=0, sticky='ew', ipady=8, pady=(5, 9))
         make_entry(pair, self.port_var).grid(row=1, column=1, sticky='ew', ipady=8, padx=(9, 0), pady=(5, 9))
-        label(body, 'Username', size=9).pack(anchor='w')
-        make_entry(body, self.user_var).pack(fill='x', ipady=8, pady=(5, 9))
-        label(body, 'Password', size=9).pack(anchor='w')
-        make_entry(body, self.pass_var, show='●').pack(fill='x', ipady=8, pady=(5, 11))
-        make_button(body, 'ทดสอบการเชื่อมต่อ', self._test_connection, kind='soft').pack(fill='x')
+        self.pg_group = tk.Frame(self.network_group, bg=WHITE)
+        label(self.pg_group, 'PostgreSQL Database (สำหรับเชื่อมต่อ)', size=9).pack(anchor='w')
+        make_entry(self.pg_group, self.pg_database_var).pack(fill='x', ipady=8, pady=(5, 9))
+        label(self.network_group, 'Username (MongoDB เว้นว่างได้หากไม่ใช้ Auth)', size=9).pack(anchor='w')
+        make_entry(self.network_group, self.user_var).pack(fill='x', ipady=8, pady=(5, 9))
+        label(self.network_group, 'Password', size=9).pack(anchor='w')
+        make_entry(self.network_group, self.pass_var, show='●').pack(fill='x', ipady=8, pady=(5, 11))
+        self.sqlite_group = tk.Frame(body, bg=WHITE)
+        label(self.sqlite_group, 'ไฟล์ฐานข้อมูล SQLite (.db / .sqlite)', size=9).pack(anchor='w')
+        sqlite_row = tk.Frame(self.sqlite_group, bg=WHITE)
+        sqlite_row.pack(fill='x', pady=(5, 11))
+        sqlite_row.grid_columnconfigure(0, weight=1)
+        make_entry(sqlite_row, self.sqlite_path_var).grid(row=0, column=0, sticky='ew', ipady=8)
+        make_button(sqlite_row, 'เปิด', self._choose_sqlite_file,
+                    kind='soft', padx=6).grid(row=0, column=1, padx=(5, 0))
+        make_button(sqlite_row, 'สร้างใหม่', self._create_sqlite_file,
+                    kind='soft', padx=6).grid(row=0, column=2, padx=(5, 0))
+        label(self.sqlite_group, 'SQLite ใช้ Schema main และสร้างไฟล์ใหม่ได้',
+              size=8, color=MUTED).pack(anchor='w', pady=(0, 8))
+        self.connection_test_btn = make_button(body, 'ทดสอบการเชื่อมต่อ', self._test_connection, kind='soft')
+        self.connection_test_btn.pack(fill='x')
         make_button(body, '↑  กลับไปเลือกไฟล์', lambda: canvas.yview_moveto(0),
                     kind='white', padx=9, pady=6).pack(anchor='w', pady=(7, 0))
+        self._refresh_backend_ui()
 
     def _build_workspace(self, right):
         for row, weight in enumerate((0, 0, 0, 0, 1, 0)):
@@ -544,7 +585,7 @@ class ImportStudio(tk.Tk):
         for col_id, heading, width, minw, anchor in (
             ('seq', '#', 44, 36, 'center'),
             ('source', 'ชื่อใน CSV (ต้นฉบับ)', 206, 133, 'w'),
-            ('target', '✎  ชื่อใน MySQL (คลิกแก้)', 249, 153, 'w'),
+            ('target', '✎  ชื่อปลายทาง (คลิกแก้)', 249, 153, 'w'),
             ('dtype', 'Data Type  ▾', 170, 125, 'w'),
             ('enabled', 'นำเข้า', 64, 60, 'center'),
         ):
@@ -631,15 +672,100 @@ class ImportStudio(tk.Tk):
             suggestion = ('tbl_' + suggestion)[:64]
         return suggestion
 
+    def _choose_sqlite_file(self):
+        filename = filedialog.askopenfilename(parent=self, title='เปิด SQLite Database',
+            filetypes=[('SQLite databases', '*.db *.sqlite *.sqlite3'), ('All files', '*.*')])
+        if filename:
+            self.sqlite_path_var.set(filename)
+
+    def _create_sqlite_file(self):
+        filename = filedialog.asksaveasfilename(parent=self, title='สร้าง SQLite Database ใหม่',
+            filetypes=[('SQLite database', '*.db'), ('SQLite file', '*.sqlite'), ('All files', '*.*')],
+            defaultextension='.db')
+        if filename:
+            self.sqlite_path_var.set(filename)
+
+    def _connection_signature(self):
+        return (self.host_var.get(), self.port_var.get(), self.user_var.get(),
+                self.pass_var.get(), self.pg_database_var.get(), self.sqlite_path_var.get())
+
+    def _invalidate_connection(self):
+        if not getattr(self, 'connected', False):
+            return
+        self.connected = False
+        self.schemas, self.tables, self.table_columns, self.unique_keys = [], [], [], []
+        self.unique_index_count = 0
+        self.schema_combo.configure(values=[])
+        self.table_combo.configure(values=[])
+        self.connected_label.configure(text=f'●  {self.backend_var.get()} / กรุณาเชื่อมต่อใหม่',
+                                       bg=NAVY_2, fg=MUTED)
+        self.status_var.set('รายละเอียดการเชื่อมต่อเปลี่ยน กรุณาทดสอบใหม่ก่อน Import')
+
+    def _on_backend_changed(self, _event=None):
+        self.connected = False
+        self.schemas, self.tables, self.table_columns, self.unique_keys = [], [], [], []
+        self.unique_index_count = 0
+        self.schema_combo.configure(values=[])
+        self.table_combo.configure(values=[])
+        engine = self.backend_var.get()
+        self.port_var.set({'MySQL': '3306', 'PostgreSQL': '5432',
+                           'MongoDB': '27017'}.get(engine, '0'))
+        self.create_schema_var.set(False)
+        if engine == 'SQLite':
+            self.schema_var.set('main')
+        elif engine == 'PostgreSQL':
+            self.schema_var.set('public')
+        else:
+            self.schema_var.set('')
+        self._refresh_backend_ui()
+        self._refresh_key_options()
+        self._update_tip()
+        self._refresh_destination()
+        self.connected_label.configure(text=f'●  {engine} / ยังไม่เชื่อมต่อ',
+                                       bg=NAVY_2, fg=INK)
+        self.status_var.set(f'เลือก {engine} แล้ว • กรุณาทดสอบการเชื่อมต่อ')
+
+    def _refresh_backend_ui(self):
+        engine = self.backend_var.get()
+        if engine == 'SQLite':
+            self.network_group.pack_forget()
+            self.sqlite_group.pack(fill='x', before=self.connection_test_btn)
+            self.schema_combo.configure(state='disabled')
+            self.create_schema_check.configure(state='disabled')
+        else:
+            self.sqlite_group.pack_forget()
+            self.network_group.pack(fill='x', before=self.connection_test_btn)
+            if engine == 'PostgreSQL':
+                self.pg_group.pack(fill='x', after=self.network_group.winfo_children()[0])
+            else:
+                self.pg_group.pack_forget()
+            self.schema_combo.configure(state='normal')
+            self.create_schema_check.configure(state='disabled' if engine == 'MongoDB' else 'normal')
+        self.schema_label.configure(text='Database (MongoDB)' if engine == 'MongoDB'
+                                    else 'Schema (PostgreSQL)' if engine == 'PostgreSQL'
+                                    else 'Schema (SQLite: main)' if engine == 'SQLite'
+                                    else 'Schema / Database (MySQL)')
+        self.table_label.configure(text='Collection / ชื่อปลายทาง' if engine == 'MongoDB'
+                                   else 'Table / ชื่อตารางปลายทาง')
+
     def _db_settings(self):
+        engine = self.backend_var.get()
+        if engine == 'SQLite':
+            if not self.sqlite_path_var.get().strip():
+                raise ValueError('กรุณาเลือกหรือระบุไฟล์ SQLite')
+            return DbSettings(self.sqlite_path_var.get().strip(), 0, '', '')
         try:
             port = int(self.port_var.get())
             if not 1 <= port <= 65535:
                 raise ValueError
         except ValueError:
             raise ValueError('Port ต้องเป็นตัวเลข 1–65535')
-        if not self.host_var.get().strip() or not self.user_var.get().strip():
-            raise ValueError('กรุณากรอก Host และ Username')
+        if not self.host_var.get().strip():
+            raise ValueError('กรุณากรอก Host')
+        if engine != 'MongoDB' and not self.user_var.get().strip():
+            raise ValueError('กรุณากรอก Username')
+        if engine == 'PostgreSQL':
+            validate_simple_identifier(self.pg_database_var.get().strip(), 'Database')
         return DbSettings(self.host_var.get().strip(), port,
                           self.user_var.get().strip(), self.pass_var.get())
 
@@ -647,23 +773,26 @@ class ImportStudio(tk.Tk):
         self.bus.put((name, *args))
 
     def _test_connection(self):
+        engine = self.backend_var.get()
         try:
             db = self._db_settings()
         except ValueError as exc:
-            messagebox.showerror('การเชื่อมต่อ MySQL', str(exc))
+            messagebox.showerror('การเชื่อมต่อฐานข้อมูล', str(exc))
             return
-        self.status_var.set('กำลังทดสอบการเชื่อมต่อ MySQL...')
+        pg_db = self.pg_database_var.get().strip()
+        signature = self._connection_signature()
+        self.status_var.set(f'กำลังทดสอบการเชื่อมต่อ {engine}...')
         def task():
             try:
-                conn = connect(db)
+                conn = open_connection(db, engine, pg_db)
                 try:
-                    schemas = list_schemas(conn)
-                    version = conn.get_server_info()
+                    schemas = list_schemas(conn, engine)
+                    version = server_version(conn, engine)
                 finally:
                     conn.close()
-                self._post('connected', schemas, version)
+                self._post('connected', engine, signature, schemas, version)
             except Exception as exc:
-                self._post('connect_error', str(exc))
+                self._post('connect_error', engine, signature, str(exc))
         threading.Thread(target=task, daemon=True).start()
 
     def _schedule_schema_fetch(self):
@@ -690,7 +819,7 @@ class ImportStudio(tk.Tk):
             self._refresh_key_options()
             return
         schema = self.schema_var.get().strip()
-        if not schema or schema not in self.schemas:
+        if not schema or (schema not in self.schemas and self.backend_var.get() != 'MongoDB'):
             self.tables = []
             self.table_combo.configure(values=[])
             self.table_columns = []
@@ -700,14 +829,16 @@ class ImportStudio(tk.Tk):
             db = self._db_settings()
         except ValueError:
             return
+        engine = self.backend_var.get()
+        pg_db = self.pg_database_var.get().strip()
         def task():
             try:
-                conn = connect(db)
+                conn = open_connection(db, engine, pg_db)
                 try:
-                    tables = list_tables(conn, schema)
+                    tables = list_tables(conn, schema, engine)
                 finally:
                     conn.close()
-                self._post('tables', schema, tables)
+                self._post('tables', engine, schema, tables)
             except Exception as exc:
                 self._post('metadata_error', str(exc))
         threading.Thread(target=task, daemon=True).start()
@@ -730,15 +861,17 @@ class ImportStudio(tk.Tk):
             db = self._db_settings()
         except ValueError:
             return
+        engine = self.backend_var.get()
+        pg_db = self.pg_database_var.get().strip()
         def task():
             try:
-                conn = connect(db)
+                conn = open_connection(db, engine, pg_db)
                 try:
-                    columns = list_columns(conn, schema, table)
-                    keys, count = unique_key_columns(conn, schema, table)
+                    columns = list_columns(conn, schema, table, engine)
+                    keys, count = unique_keys(conn, schema, table, engine)
                 finally:
                     conn.close()
-                self._post('columns', schema, table, columns, keys, count)
+                self._post('columns', engine, schema, table, columns, keys, count)
             except Exception as exc:
                 self._post('metadata_error', str(exc))
         threading.Thread(target=task, daemon=True).start()
@@ -749,7 +882,7 @@ class ImportStudio(tk.Tk):
     def _mode_changed(self):
         self._close_editor()
         mode = self.current_mode()
-        if mode != 'create':
+        if mode != 'create' or self.backend_var.get() in ('SQLite', 'MongoDB'):
             self.create_schema_var.set(False)
         elif self.mappings:
             for m in self.mappings:
@@ -767,17 +900,17 @@ class ImportStudio(tk.Tk):
     def _update_tip(self):
         mode = self.current_mode()
         if mode == 'create':
-            self.key_tip.configure(text='Unique Key เลือกได้เฉพาะคอลัมน์ VARCHAR / ตัวเลข / วันที่')
+            self.key_tip.configure(text='Unique Key กำหนดได้เมื่อสร้าง Table/Collection ใหม่')
         elif mode == 'upsert':
             self.key_tip.configure(text='Upsert ต้องเลือก Unique / Primary Key ที่มีอยู่ใน Table')
         else:
             self.key_tip.configure(text='ไม่จำเป็นต้องระบุ Unique Key สำหรับโหมดนี้')
         if hasattr(self, 'mapping_help_var'):
-            if mode == 'create':
-                self.mapping_help_var.set('✎ คลิกชื่อปลายทางแล้วพิมพ์  •  ▾ คลิกเลือก Data Type  •  ✓ เลือก/ยกเลิกคอลัมน์')
+            if mode == 'create' or self.backend_var.get() == 'MongoDB':
+                self.mapping_help_var.set('✎ คลิกแก้ชื่อฟิลด์  •  ▾ เลือกประเภทข้อมูล  •  ✓ เลือก/ยกเลิกคอลัมน์')
                 self.all_text_btn.configure(state='normal')
             else:
-                self.mapping_help_var.set('✎ คลิกชื่อปลายทางเพื่อจับคู่คอลัมน์  •  Data Type ตาม MySQL เดิม (เปลี่ยนไม่ได้)')
+                self.mapping_help_var.set('✎ คลิกชื่อปลายทางเพื่อจับคู่คอลัมน์  •  Data Type ตามฐานข้อมูลเดิม (เปลี่ยนไม่ได้)')
                 self.all_text_btn.configure(state='disabled')
 
     def _refresh_key_options(self):
@@ -786,7 +919,7 @@ class ImportStudio(tk.Tk):
         mode = self.current_mode()
         if mode == 'create':
             keys = [''] + [m.target_name for m in self.mappings
-                           if m.include and m.data_type in INDEXABLE_TYPES]
+                           if m.include and (m.data_type in INDEXABLE_TYPES or self.backend_var.get() in ('SQLite', 'PostgreSQL', 'MongoDB'))]
             self.key_combo.configure(values=keys, state='readonly')
             if self.key_var.get() not in keys:
                 self.key_var.set('')
@@ -1021,7 +1154,7 @@ class ImportStudio(tk.Tk):
         idx = int(row)
         if col == '#3':
             self._edit_target(idx)
-        elif col == '#4' and self.current_mode() == 'create':
+        elif col == '#4' and (self.current_mode() == 'create' or self.backend_var.get() == 'MongoDB'):
             self._edit_data_type(idx)
         elif col == '#5':
             self._close_editor()
@@ -1051,7 +1184,7 @@ class ImportStudio(tk.Tk):
 
     def _edit_data_type(self, idx: int, *, post_dropdown=True):
         self._close_editor()
-        if idx < 0 or idx >= len(self.mappings) or self.current_mode() != 'create':
+        if idx < 0 or idx >= len(self.mappings) or (self.current_mode() != 'create' and self.backend_var.get() != 'MongoDB'):
             return
         bbox = self.mapping_tree.bbox(str(idx), '#4')
         if not bbox:
@@ -1110,7 +1243,7 @@ class ImportStudio(tk.Tk):
                 if any(m.include and m.target_name.casefold() == name.casefold()
                        for j, m in enumerate(self.mappings) if j != idx):
                     raise ValueError('ชื่อคอลัมน์ปลายทางซ้ำกับคอลัมน์อื่น')
-                if self.current_mode() != 'create' and self.table_columns:
+                if self.current_mode() != 'create' and self.backend_var.get() != 'MongoDB' and self.table_columns:
                     lookup = {c['name'].casefold(): c['name'] for c in self.table_columns}
                     if name.casefold() not in lookup:
                         raise ValueError('ชื่อคอลัมน์นี้ไม่มีอยู่ใน Table ปลายทาง')
@@ -1133,8 +1266,8 @@ class ImportStudio(tk.Tk):
         target.select_range(0, 'end')
 
     def _set_all_text(self):
-        if self.current_mode() != 'create':
-            messagebox.showinfo('ประเภทข้อมูล', 'การนำเข้าตารางเดิมจะใช้ Data Type ตามโครงสร้าง MySQL และเปลี่ยนจากโปรแกรมไม่ได้')
+        if self.current_mode() != 'create' and self.backend_var.get() != 'MongoDB':
+            messagebox.showinfo('ประเภทข้อมูล', 'การนำเข้าตารางเดิมจะใช้ Data Type ตามโครงสร้างของฐานข้อมูล และเปลี่ยนจากโปรแกรมไม่ได้')
             return
         self._close_editor()
         for m in self.mappings:
@@ -1144,6 +1277,10 @@ class ImportStudio(tk.Tk):
         self.status_var.set('ตั้ง Data Type ของทุกคอลัมน์เป็น TEXT แล้ว (ไม่ได้เปลี่ยนค่าในไฟล์ CSV)')
 
     def _apply_existing_column_matches(self):
+        if self.backend_var.get() == 'MongoDB':
+            # Existing MongoDB collections have no fixed column schema. Keep all CSV fields.
+            self._refresh_mapping_table()
+            return
         if not self.table_columns or self.current_mode() == 'create':
             return
         lookup = {c['name'].casefold(): c for c in self.table_columns}
@@ -1172,20 +1309,20 @@ class ImportStudio(tk.Tk):
         validate_simple_identifier(table, 'Table')
         mode = self.current_mode()
         if not self.connected:
-            raise ValueError('กรุณาทดสอบการเชื่อมต่อ MySQL ก่อนนำเข้า')
+            raise ValueError('กรุณาทดสอบการเชื่อมต่อฐานข้อมูลก่อนนำเข้า')
         if mode != 'create' and (schema not in self.schemas or table not in self.tables):
             raise ValueError('กรุณาเลือก Schema และ Table ที่มีอยู่สำหรับ Append / Upsert / Replace')
         if self.create_schema_var.get() and schema in self.schemas:
             raise ValueError('Schema นี้มีอยู่แล้ว กรุณาปิดตัวเลือกสร้าง Schema ใหม่')
         if mode == 'create' and schema in self.schemas and table in self.tables:
             raise ValueError('Table นี้มีอยู่แล้ว กรุณาตั้งชื่อใหม่ หรือเลือกโหมดเพิ่ม/อัปเดต')
-        if mode == 'create' and schema not in self.schemas and not self.create_schema_var.get():
+        if mode == 'create' and schema not in self.schemas and not self.create_schema_var.get() and self.backend_var.get() != 'MongoDB':
             raise ValueError('ไม่พบ Schema นี้ กรุณาเลือกสร้าง Schema ใหม่ หรือเชื่อมต่ออีกครั้ง')
-        if mode == 'upsert' and self.unique_index_count != 1:
+        if mode == 'upsert' and self.backend_var.get() == 'MySQL' and self.unique_index_count != 1:
             raise ValueError('Upsert รองรับ Table ที่มี UNIQUE / PRIMARY KEY แบบคอลัมน์เดียว เพียง 1 ดัชนี')
         if mode == 'create' and self.key_var.get():
             matched = [m for m in self.mappings if m.include and m.target_name == self.key_var.get()]
-            if not matched or matched[0].data_type not in INDEXABLE_TYPES:
+            if not matched or (matched[0].data_type not in INDEXABLE_TYPES and self.backend_var.get() == 'MySQL'):
                 raise ValueError('Unique Key ต้องใช้ Data Type ที่ทำ Index ได้ เช่น VARCHAR / INT / DATE')
         return ImportOptions(
             csv_spec=CSVSpec(self.csv_path_var.get().strip(), self.encoding_var.get(), self.delimiter_var.get()),
@@ -1216,7 +1353,7 @@ class ImportStudio(tk.Tk):
             answer = simpledialog.askstring('ยืนยัน Replace All',
                 f'คำเตือน: ข้อมูลเดิมทั้งหมดใน {destination} จะถูกลบ แล้วแทนที่ด้วย CSV ใหม่\n'
                 f'ข้อมูลต้นทาง: {row_description}\n'
-                'โปรดสำรอง Table เดิมก่อน และใช้ InnoDB เพื่อให้ Rollback ได้\n\n'
+                'โปรดสำรองข้อมูลปลายทางก่อนเริ่ม Replace\n\n'
                 'พิมพ์ REPLACE เพื่อยืนยัน', parent=self)
             if answer != 'REPLACE':
                 return
@@ -1229,12 +1366,15 @@ class ImportStudio(tk.Tk):
         self.cancel_flag.clear()
         self.is_importing = True
         self.run_btn.configure(state='disabled')
+        self.backend_combo.configure(state='disabled')
         self.cancel_btn.configure(state='normal')
         self.progress_var.set(0)
         self.status_var.set('เริ่มตรวจสอบไฟล์และปลายทาง...')
+        engine = self.backend_var.get()
+        pg_db = self.pg_database_var.get().strip()
         def task():
             try:
-                result = run_import(opts,
+                result = run_import(opts, engine, pg_db,
                     progress=lambda percent, rows, text: self._post('progress', percent, rows, text),
                     is_cancelled=self.cancel_flag.is_set)
                 self._post('done', result)
@@ -1263,7 +1403,7 @@ class ImportStudio(tk.Tk):
                         f'  •  แสดงตัวอย่าง {len(self.preview.rows):,} แถวแรก'
                         f'  •  Encoding: {self.preview.encoding}'
                     )
-                    self.status_var.set(f'อ่านไฟล์สำเร็จ • ข้อมูลทั้งหมด {total:,} แถว • เลือก Schema / Table และเริ่มนำเข้าได้')
+                    self.status_var.set(f'อ่านไฟล์สำเร็จ • ข้อมูล {total:,} แถว • เลือกฐานข้อมูลปลายทางแล้วเริ่มนำเข้าได้')
                 elif event == 'rowcount_error':
                     token, message = args
                     if token != self._rowcount_token:
@@ -1271,30 +1411,36 @@ class ImportStudio(tk.Tk):
                     self.stat_rows_var.set('นับไม่ได้')
                     self.status_var.set('นับแถวไม่สำเร็จ • ' + message[:120])
                 elif event == 'connected':
-                    schemas, version = args
+                    engine, signature, schemas, version = args
+                    if engine != self.backend_var.get() or signature != self._connection_signature():
+                        continue
                     self.connected = True
                     self.schemas = schemas
                     self.schema_combo.configure(values=schemas)
-                    self.connected_label.configure(text=f'●  MySQL เชื่อมต่อแล้ว  /  {version}',
+                    self.connected_label.configure(text=f'●  {engine} เชื่อมต่อแล้ว  /  {version}',
                                                    bg=GREEN_PALE, fg=GREEN)
-                    self.status_var.set(f'เชื่อมต่อสำเร็จ • พบ {len(schemas)} Schema')
+                    self.status_var.set(f'เชื่อมต่อ {engine} สำเร็จ • พบ {len(schemas)} Schema/Database')
                     if self.schema_var.get().strip() in schemas:
                         self._fetch_tables()
                 elif event == 'connect_error':
+                    engine, signature, err = args
+                    if engine != self.backend_var.get() or signature != self._connection_signature():
+                        continue
                     self.connected = False
                     self.connected_label.configure(text='●  เชื่อมต่อไม่สำเร็จ',
                                                    bg=RED_PALE, fg=RED)
                     self.status_var.set('เชื่อมต่อไม่สำเร็จ • ตรวจสอบ Host / Port / Username / Password')
-                    messagebox.showerror('เชื่อมต่อ MySQL ไม่สำเร็จ', args[0])
+                    messagebox.showerror('เชื่อมต่อฐานข้อมูลไม่สำเร็จ', err)
                 elif event == 'tables':
-                    schema, tables = args
-                    if schema == self.schema_var.get().strip():
+                    engine, schema, tables = args
+                    if self.connected and engine == self.backend_var.get() and schema == self.schema_var.get().strip():
                         self.tables = tables
                         self.table_combo.configure(values=tables)
                         self._fetch_table_metadata()
                 elif event == 'columns':
-                    schema, table, columns, keys, count = args
-                    if (schema == self.schema_var.get().strip() and
+                    engine, schema, table, columns, keys, count = args
+                    if (self.connected and engine == self.backend_var.get() and
+                            schema == self.schema_var.get().strip() and
                             table == self.table_var.get().strip() and
                             self.current_mode() != 'create'):
                         self.table_columns = columns
@@ -1312,6 +1458,7 @@ class ImportStudio(tk.Tk):
                     result = args[0]
                     self.is_importing = False
                     self.run_btn.configure(state='normal')
+                    self.backend_combo.configure(state='readonly')
                     self.cancel_btn.configure(state='disabled')
                     self.progress_var.set(100)
                     self.status_var.set(f'นำเข้าสำเร็จ {result.processed:,} แถว • ข้ามแถวว่าง {result.skipped_blank:,}')
@@ -1322,6 +1469,7 @@ class ImportStudio(tk.Tk):
                 elif event == 'import_error':
                     self.is_importing = False
                     self.run_btn.configure(state='normal')
+                    self.backend_combo.configure(state='readonly')
                     self.cancel_btn.configure(state='disabled')
                     self.status_var.set('นำเข้าไม่สำเร็จ • ตรวจสอบข้อความผิดพลาด')
                     messagebox.showerror('นำเข้าข้อมูลไม่สำเร็จ', args[0])
@@ -1347,7 +1495,7 @@ class ImportStudio(tk.Tk):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='CSV Import Studio v5 Space Edition')
-    parser.add_argument('--demo', action='store_true', help='Open with a sample CSV and no MySQL connection')
+    parser = argparse.ArgumentParser(description='CSV Import Studio v6 Multi-DB Space Edition')
+    parser.add_argument('--demo', action='store_true', help='Open with sample CSV without connecting to a database')
     args = parser.parse_args()
     ImportStudio(demo=args.demo).mainloop()

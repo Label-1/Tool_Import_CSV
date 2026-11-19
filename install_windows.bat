@@ -2,7 +2,7 @@
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
-echo Installing PyMySQL for CSV Import Studio v5 Space Edition ...
+echo Installing MySQL, PostgreSQL and MongoDB drivers for CSV Import Studio v6 ...
 where py >nul 2>&1
 if not errorlevel 1 (
   py -3 -m pip install -r requirements.txt
